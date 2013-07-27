@@ -24,6 +24,8 @@ import re
 import json
 import unittest
 import os
+import signal
+import subprocess
 
 # 3rd party imports.
 import gevent
@@ -95,6 +97,7 @@ bin/nosetests -s -v --nologcapture ion/agents/instrument/test/test_instrument_ag
 bin/nosetests -s -v --nologcapture ion/agents/instrument/test/test_instrument_agent.py:TestInstrumentAgent.test_streaming_memuse
 bin/nosetests -s -v --nologcapture ion/agents/instrument/test/test_instrument_agent.py:TestInstrumentAgent.test_capabilities_new
 bin/nosetests -s -v --nologcapture ion/agents/instrument/test/test_instrument_agent.py:TestInstrumentAgent.test_exit_da_timing
+bin/nosetests -s -v --nologcapture ion/agents/instrument/test/test_instrument_agent.py:TestInstrumentAgent.test_driver_crash
 """
 
 ###############################################################################
@@ -135,6 +138,12 @@ DRV_SHA_0_1_5 = '51ce182316f4f9dce336a76164276cb4749b77a5'
 DRV_SHA = DRV_SHA_0_1_5
 DRV_MOD = 'mi.instrument.seabird.sbe37smb.ooicore.driver'
 DRV_CLS = 'SBE37Driver'
+
+# these defintions will be referenced by other tests
+#  404: bad URI; BAD: driver will launch but commands will fail; GOOD: launch and commanding will succeed
+DRV_URI_GOOD = DRV_URI
+DRV_URI_BAD  = "http://sddevrepo.oceanobservatories.org/releases/seabird_sbe37smb_ooicore-0.1a-py2.7.egg"
+DRV_URI_404  = "http://sddevrepo.oceanobservatories.org/releases/completely_made_up_404.egg"
 
 # Driver config.
 # DVR_CONFIG['comms_config']['port'] is set by the setup.
@@ -1323,7 +1332,8 @@ class InstrumentAgentTest():
                         'alerts',
                         'streams',
                         'pubrate',
-                        'aggstatus'
+                        'aggstatus',
+                        'driver_pid'
                         ]
         
         res_cmds_all =[
@@ -2247,7 +2257,8 @@ class InstrumentAgentTest():
                         'alerts',
                         'streams',
                         'pubrate',
-                        'aggstatus'
+                        'aggstatus',
+                        'driver_pid'
                         ]
         
         res_cmds_all =[
@@ -2396,6 +2407,50 @@ class InstrumentAgentTest():
 
         print '######## exiting direct access takes: %f seconds' % delta
 
+    def test_driver_crash(self):
+        """
+        Test detection of killed/crashed driver, or loss of driver comms.
+        """
+        state = self._ia_client.get_agent_state()
+        self.assertEqual(state, ResourceAgentState.UNINITIALIZED)
+
+        cmd = AgentCommand(command=ResourceAgentEvent.INITIALIZE)
+        retval = self._ia_client.execute_agent(cmd)
+        state = self._ia_client.get_agent_state()
+        self.assertEqual(state, ResourceAgentState.INACTIVE)
+
+        cmd = AgentCommand(command=ResourceAgentEvent.GO_ACTIVE)
+        retval = self._ia_client.execute_agent(cmd)
+        state = self._ia_client.get_agent_state()
+        self.assertEqual(state, ResourceAgentState.IDLE)
+
+        cmd = AgentCommand(command=ResourceAgentEvent.RUN)
+        retval = self._ia_client.execute_agent(cmd)
+        state = self._ia_client.get_agent_state()
+        self.assertEqual(state, ResourceAgentState.COMMAND)
+
+        dvr_pid = self._ia_client.get_agent(['driver_pid'])['driver_pid']
+        gevent.sleep(15)
+
+        # Kill driver.
+        log.info('Sending kill signal to driver.')
+        #retval = os.kill(int(dvr_pid), signal.SIGKILL)
+        args = ['kill', '-9', str(dvr_pid)]
+        retval = subprocess.check_output(args)
+        log.info('Kill signal output: %s', str(retval))
+
+        start = time.time()
+        elapsed = 0
+        while elapsed < 300:
+            gevent.sleep(5)
+            state = self._ia_client.get_agent_state()
+            log.info('Insturment agent state is %s.', state)
+            if state == ResourceAgentState.UNINITIALIZED:
+                break
+            elapsed = time.time() - start
+
+        state = self._ia_client.get_agent_state()
+        self.assertEqual(state, ResourceAgentState.UNINITIALIZED)
 
 @attr('HARDWARE', group='sa')
 @patch.dict(CFG, {'endpoint':{'receive':{'timeout': 600}}})

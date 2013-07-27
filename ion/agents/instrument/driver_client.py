@@ -182,7 +182,7 @@ class ZmqDriverClient(DriverClient):
         # Package command dictionary.
         driver_timeout = kwargs.pop('driver_timeout', 600)
         msg = {'cmd':cmd,'args':args,'kwargs':kwargs}
-        
+
         log.debug('Sending command %s.' % str(msg))
         start_send = time.time()
         while True:
@@ -200,7 +200,7 @@ class ZmqDriverClient(DriverClient):
                 time.sleep(.5)
                 delta = time.time() - start_send
                 if delta >= driver_timeout:
-                    raise InstDriverClientTimeoutError
+                    raise InstDriverClientTimeoutError()
 
             except Exception,e:
                 log.error('Driver client error writing to zmq socket: ' + str(e))
@@ -220,7 +220,7 @@ class ZmqDriverClient(DriverClient):
                 time.sleep(.5)
                 delta = time.time() - start_reply
                 if delta >= driver_timeout:
-                    raise InstDriverClientTimeoutError
+                    raise InstDriverClientTimeoutError()
 
             except Exception,e:
                 log.error('Driver client error reading from zmq socket: ' + str(e))

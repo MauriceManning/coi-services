@@ -198,6 +198,9 @@ class InstrumentAgent(ResourceAgent):
         # Use default base class get function.
         self.aparam_set_pubrate = None
 
+        # The driver process id. For test instrumentation.
+        self.aparam_driver_pid = None
+
         # Autoreconnect thread.
         self._autoreconnect_greenlet = None
 
@@ -212,6 +215,7 @@ class InstrumentAgent(ResourceAgent):
 
         # Driver pinger greenlet.
         self._pinger = None
+        #self._stop_pinger = False
 
         # Agent schema.
         # Loaded with driver start/stop.
@@ -250,6 +254,7 @@ class InstrumentAgent(ResourceAgent):
         """
 
         super(InstrumentAgent, self).on_quit()
+        self._stop_pinger()
 
         self._aam.stop_all()
         
@@ -273,12 +278,14 @@ class InstrumentAgent(ResourceAgent):
                 self._dvr_client.cmd_dvr('disconnect')
                 self._dvr_client.cmd_dvr('initialize')
             except:
+                self._stop_driver(True)
                 self._on_driver_comms_error('on_quit')
-            self._stop_driver()
-            
+            else:
+                self._stop_driver()
+
     ##############################################################
     # Capabilities interface and event handlers.
-    ##############################################################    
+    ##############################################################
 
     def _handler_get_resource_capabilities(self, *args, **kwargs):
         """
@@ -287,7 +294,7 @@ class InstrumentAgent(ResourceAgent):
             result = self._dvr_client.cmd_dvr('get_resource_capabilities', *args, **kwargs)
             next_state = None
         except InstDriverClientTimeoutError:
-            self._stop_driver()
+            self._stop_driver(True)
             next_state = ResourceAgentState.UNINITIALIZED
             result = None
             self._on_driver_comms_error('_handler_get_resource_capabilities')
@@ -304,7 +311,7 @@ class InstrumentAgent(ResourceAgent):
         """
         agent_cmds = self._fsm.get_events(current_state)
         res_iface_cmds = [x for x in agent_cmds if ResourceInterfaceCapability.has(x)]
-    
+
         # convert agent mediated resource commands into interface names.
         result = []
         for x in res_iface_cmds:
@@ -320,10 +327,10 @@ class InstrumentAgent(ResourceAgent):
                 result.append('execute_resource')
 
         return result
-    
+
     ##############################################################
     # Agent interface.
-    ##############################################################    
+    ##############################################################
 
     ##############################################################
     # Governance interfaces
@@ -467,7 +474,7 @@ class InstrumentAgent(ResourceAgent):
 
     ##############################################################
     # Resource interface and common resource event handlers.
-    ##############################################################    
+    ##############################################################
 
     def _handler_get_resource(self, *args, **kwargs):
         try:
@@ -482,7 +489,7 @@ class InstrumentAgent(ResourceAgent):
             result = self._dvr_client.cmd_dvr('get_resource', params)
 
         except InstDriverClientTimeoutError:
-            self._stop_driver()
+            self._stop_driver(True)
             next_state = ResourceAgentState.UNINITIALIZED
             self._on_driver_comms_error('_handler_get_resource')
         return (next_state, result)
@@ -498,7 +505,7 @@ class InstrumentAgent(ResourceAgent):
         try:
             result = self._dvr_client.cmd_dvr('set_resource', params)
         except InstDriverClientTimeoutError:
-            self._stop_driver()
+            self._stop_driver(True)
             next_state = ResourceAgentState.UNINITIALIZED
             self._on_driver_comms_error('_handler_set_resource')
 
@@ -508,7 +515,7 @@ class InstrumentAgent(ResourceAgent):
         try:
             (next_state, result) = self._dvr_client.cmd_dvr('execute_resource', *args, **kwargs)
         except InstDriverClientTimeoutError:
-            self._stop_driver()
+            self._stop_driver(True)
             result = None
             next_state = ResourceAgentState.UNINITIALIZED
             self._on_driver_comms_error('_handler_execute_resource')
@@ -520,7 +527,7 @@ class InstrumentAgent(ResourceAgent):
             result = self._dvr_client.cmd_dvr('get_resource_state',*args, **kwargs)
             next_state = None
         except InstDriverClientTimeoutError:
-            self._stop_driver()
+            self._stop_driver(True)
             next_state = ResourceAgentState.UNINITIALIZED
             result = None
             self._on_driver_comms_error('_handler_get_resource_state')
@@ -533,7 +540,7 @@ class InstrumentAgent(ResourceAgent):
                                   get_ion_ts())
             next_state = None
         except InstDriverClientTimeoutError:
-            self._stop_driver()
+            self._stop_driver(True)
             next_state = ResourceAgentState.UNINITIALIZED
             result = None
             self._on_driver_comms_error('_handler_ping_resource')
@@ -549,7 +556,7 @@ class InstrumentAgent(ResourceAgent):
         except KeyError:
             log.error('_handler_state_change_async did not recieve required state parameter.')
             return (None, None)
-        
+
         if next_state not in [
             InstrumentAgentState.CALIBRATE,
             InstrumentAgentState.BUSY,
@@ -562,7 +569,11 @@ class InstrumentAgent(ResourceAgent):
 
     ##############################################################
     # UNINITIALIZED event handlers.
-    ##############################################################    
+    ##############################################################
+
+    def _handler_unintialized_enter(self, *args, **kwargs):
+        super(InstrumentAgent, self)._common_state_enter(*args, **kwargs)
+        self._stop_pinger()
 
     def _handler_uninitialized_initialize(self, *args, **kwargs):
         # If a config is passed, update member.
@@ -570,19 +581,19 @@ class InstrumentAgent(ResourceAgent):
             self._dvr_config = args[0]
         except IndexError:
             pass
-        
+
         # If config not valid, fail.
         if not self._validate_driver_config():
             raise BadRequest('The driver configuration is missing or invalid.')
 
         # Start the driver and switch to inactive.
         self._start_driver(self._dvr_config)
-        
+
         return (ResourceAgentState.INACTIVE, None)
 
     ##############################################################
     # INACTIVE event handlers.
-    ##############################################################    
+    ##############################################################
 
     def _handler_inactive_reset(self, *args, **kwargs):
         self._stop_driver()
@@ -594,26 +605,28 @@ class InstrumentAgent(ResourceAgent):
             self._dvr_config['comms_config'] = args[0]
         except IndexError:
             pass
-        
+
         # Connect to the device.
         dvr_comms = self._dvr_config.get('comms_config', None)
         try:
             self._dvr_client.cmd_dvr('configure', dvr_comms)
             self._dvr_client.cmd_dvr('connect')
-            resource_schema = self._dvr_client.cmd_dvr('get_config_metadata')
+
         except InstDriverClientTimeoutError:
-            self._stop_driver()
+            self._stop_driver(True)
             self._on_driver_comms_error('_handler_inactive_go_active')
             return (ResourceAgentState.UNINITIALIZED, None)
 
+        """
         if isinstance(resource_schema, str):
             resource_schema = json.loads(resource_schema)
             if isinstance(resource_schema, dict):
                 self._resource_schema = resource_schema
             else:
-                self._resource_schema = {}                    
+                self._resource_schema = {}
         else:
             self._resource_schema = {}
+        """
 
         # Reset the connection id and index.
         self._asp.reset_connection()
@@ -633,15 +646,16 @@ class InstrumentAgent(ResourceAgent):
                     next_state = ResourceAgentState.ACTIVE_UNKNOWN
                     break
             except InstDriverClientTimeoutError:
-                self._stop_driver()
+                self._stop_driver(True)
                 next_state = ResourceAgentState.UNINITIALIZED
                 self._on_driver_comms_error('_handler_inactive_go_active')
+                break
 
         return (next_state, None)
 
     ##############################################################
     # IDLE event handlers.
-    ##############################################################    
+    ##############################################################
 
     def _handler_idle_reset(self, *args, **kwargs):
         # Disconnect, initialize, stop driver and go to uninitialized.
@@ -650,8 +664,9 @@ class InstrumentAgent(ResourceAgent):
             self._dvr_client.cmd_dvr('initialize')
         except:
             self._on_driver_comms_error('_handler_idle_reset')
-
-        self._stop_driver()
+            self._stop_driver(True)
+        else:
+            self._stop_driver()
 
         return (ResourceAgentState.UNINITIALIZED, None)
 
@@ -661,7 +676,7 @@ class InstrumentAgent(ResourceAgent):
             self._dvr_client.cmd_dvr('initialize')
             next_state = ResourceAgentState.INACTIVE
         except InstDriverClientTimeoutError:
-            self._stop_driver()
+            self._stop_driver(True)
             next_state = ResourceAgentState.UNINITIALIZED
             self._on_driver_comms_error('_handler_idle_go_inactive')
 
@@ -674,7 +689,7 @@ class InstrumentAgent(ResourceAgent):
 
     ##############################################################
     # STOPPED event handlers.
-    ##############################################################    
+    ##############################################################
 
     def _handler_stopped_reset(self, *args, **kwargs):
         try:
@@ -682,7 +697,9 @@ class InstrumentAgent(ResourceAgent):
             self._dvr_client.cmd_dvr('initialize')
         except:
             self._on_driver_comms_error('_handler_stopped_reset')
-        self._stop_driver()
+            self._stop_driver(True)
+        else:
+            self._stop_driver()
         return (ResourceAgentState.UNINITIALIZED, None)
 
     def _handler_stopped_go_inactive(self, *args, **kwargs):
@@ -691,7 +708,7 @@ class InstrumentAgent(ResourceAgent):
             self._dvr_client.cmd_dvr('initialize')
             next_state = ResourceAgentState.INACTIVE
         except InstDriverClientTimeoutError:
-            self._stop_driver()
+            self._stop_driver(True)
             next_state = ResourceAgentState.UNINITIALIZED
             self._on_driver_comms_error('_handler_stopped_go_inactive')
         return (next_state, None)
@@ -704,7 +721,7 @@ class InstrumentAgent(ResourceAgent):
 
     ##############################################################
     # COMMAND event handlers.
-    ##############################################################    
+    ##############################################################
 
     def _handler_command_reset(self, *args, **kwargs):
         try:
@@ -712,18 +729,23 @@ class InstrumentAgent(ResourceAgent):
             self._dvr_client.cmd_dvr('initialize')
         except:
             self._on_driver_comms_error('_handler_command_reset')
-        self._stop_driver()
+            self._stop_driver(True)
+
+        else:
+            self._stop_driver()
+
         return (ResourceAgentState.UNINITIALIZED, None)
-    
+
     def _handler_command_go_inactive(self, *args, **kwargs):
         try:
             self._dvr_client.cmd_dvr('disconnect')
             self._dvr_client.cmd_dvr('initialize')
             next_state = ResourceAgentState.INACTIVE
         except InstDriverClientTimeoutError:
-            self._stop_driver()
+            self._stop_driver(True)
             next_state = ResourceAgentState.UNINITIALIZED
             self._on_driver_comms_error('_handler_command_go_inactive')
+
         return (next_state, None)
 
     def _handler_command_clear(self, *args, **kwargs):
@@ -738,7 +760,7 @@ class InstrumentAgent(ResourceAgent):
         session_type = kwargs.get('session_type', None)
 
         if not session_type:
-            raise BadRequest('Instrument parameter error attempting direct access: session_type not present') 
+            raise BadRequest('Instrument parameter error attempting direct access: session_type not present')
 
         log.info("Instrument agent requested to start direct access mode: sessionTO=%d, inactivityTO=%d,  session_type=%s",
                  session_timeout, inactivity_timeout,
@@ -750,19 +772,19 @@ class InstrumentAgent(ResourceAgent):
         log.debug("hostname: %s, ip address: %s", hostname, ip_addresses)
 #        ip_address = ip_addresses[2][0]
         ip_address = hostname
-        
+
         # create a DA server instance (TODO: just telnet for now) and pass
         # in callback method
         try:
-            self._da_server = DirectAccessServer(session_type, 
-                                                self._da_server_input_processor, 
+            self._da_server = DirectAccessServer(session_type,
+                                                self._da_server_input_processor,
                                                 ip_address,
                                                 session_timeout,
                                                 inactivity_timeout)
         except Exception as ex:
             log.warning("InstrumentAgent: failed to start DA Server <%s>",ex)
             raise ex
-        
+
         # get the connection info from the DA server to return to the user
         port, token = self._da_server.get_connection_info()
         result = {'ip_address':ip_address, 'port':port, 'token':token}
@@ -770,7 +792,7 @@ class InstrumentAgent(ResourceAgent):
         try:
             next_state, _ = self._dvr_client.cmd_dvr('start_direct')
         except InstDriverClientTimeoutError:
-            self._stop_driver()
+            self._stop_driver(True)
             self._da_server.stop()
             self._da_server = None
             next_state = ResourceAgentState.UNINITIALIZED
@@ -781,52 +803,62 @@ class InstrumentAgent(ResourceAgent):
 
     ##############################################################
     # STREAMING event handlers.
-    ##############################################################    
-    
+    ##############################################################
+
     def _handler_streaming_reset(self, *args, **kwargs):
         try:
             self._dvr_client.cmd_dvr('disconnect')
             self._dvr_client.cmd_dvr('initialize')
         except:
             self._on_driver_comms_error('_handler_streaming_reset')
-        self._stop_driver()
+            self._stop_driver(True)
+        else:
+            self._stop_driver()
+
         return (ResourceAgentState.UNINITIALIZED, None)
-    
+
     def _handler_streaming_go_inactive(self, *args, **kwargs):
         try:
             self._dvr_client.cmd_dvr('disconnect')
             self._dvr_client.cmd_dvr('initialize')
             next_state = ResourceAgentState.INACTIVE
         except InstDriverClientTimeoutError:
-            self._stop_driver()
+            self._stop_driver(True)
             next_state = ResourceAgentState.UNINITIALIZED
             self._on_driver_comms_error('_handler_streaming_go_inactive')
+
         return (next_state, None)
-    
+
     ##############################################################
     # TEST event handlers.
-    ##############################################################    
+    ##############################################################
 
     ##############################################################
     # CALIBRATE event handlers.
-    ##############################################################    
+    ##############################################################
 
     ##############################################################
     # BUSY event handlers.
-    ##############################################################    
+    ##############################################################
 
     ##############################################################
     # DIRECT_ACCESS event handlers.
-    ##############################################################    
+    ##############################################################
 
     def _handler_direct_access_execute_resource(self, *args, **kwargs):
         try:
             (next_state, result) = self._dvr_client.cmd_dvr('execute_direct', *args, **kwargs)
         except InstDriverClientTimeoutError:
-            self._stop_driver()
+            self._stop_driver(True)
             result = None
             next_state = ResourceAgentState.UNINITIALIZED
             self._on_driver_comms_error('_handler_direct_access_execute_resource')
+            # Stop the DA server. This must always be done to kill its session/inactivity timeout thread
+            if (self._da_server):
+                self._da_server.stop()
+                self._da_server = None
+            self._da_session_close_reason = 'lost comms to driver'
+
         return (next_state, result)
 
     def _handler_direct_access_go_command(self, *args, **kwargs):
@@ -845,7 +877,7 @@ class InstrumentAgent(ResourceAgent):
         try:
             next_state, _ = self._dvr_client.cmd_dvr('stop_direct')
         except InstDriverClientTimeoutError:
-            self._stop_driver()
+            self._stop_driver(True)
             next_state = ResourceAgentState.UNINITIALIZED
             self._on_driver_comms_error('_handler_direct_access_go_command')
 
@@ -853,7 +885,7 @@ class InstrumentAgent(ResourceAgent):
 
     ##############################################################
     # CONNECTION_LOST event handler, available in any active state.
-    ##############################################################    
+    ##############################################################
 
     def _handler_connection_lost_driver_event(self, *args, **kwargs):
         """
@@ -864,7 +896,7 @@ class InstrumentAgent(ResourceAgent):
 
     ##############################################################
     # CONNECTION_LOST event handlers.
-    ##############################################################    
+    ##############################################################
 
     def _handler_lost_connection_enter(self, *args, **kwargs):
         super(InstrumentAgent, self)._common_state_enter(*args, **kwargs)
@@ -874,7 +906,7 @@ class InstrumentAgent(ResourceAgent):
             event_type='ResourceAgentConnectionLostErrorEvent',
             origin_type=self.ORIGIN_TYPE,
             origin=self.resource_id)
-        
+
         # Setup reconnect timer.
         self._autoreconnect_greenlet = gevent.spawn(self._autoreconnect)
 
@@ -890,27 +922,31 @@ class InstrumentAgent(ResourceAgent):
                 self._fsm.on_event(ResourceAgentEvent.AUTORECONNECT)
             except:
                 pass
-    
+
     def _handler_lost_connection__reset(self, *args, **kwargs):
         try:
             self._dvr_client.cmd_dvr('initialize')
         except:
             self._on_driver_comms_error('_handler_lost_connection__reset')
-        self._stop_driver()
+            self._stop_driver(True)
+        else:
+            self._stop_driver()
+
+
         return (ResourceAgentState.UNINITIALIZED, None)
-    
+
     def _handler_lost_connection__go_inactive(self, *args, **kwargs):
         try:
             self._dvr_client.cmd_dvr('initialize')
             next_state = ResourceAgentState.INACTIVE
         except InstDriverClientTimeoutError:
-            self._stop_driver()
+            self._stop_driver(True)
             next_state = ResourceAgentState.UNINITIALIZED
             self._on_driver_comms_error('_handler_lost_connection__go_inactive')
         return (next_state, None)
 
     def _handler_lost_connection__autoreconnect(self, *args, **kwargs):
-    
+
         try:
             self._dvr_client.cmd_dvr('connect')
 
@@ -918,8 +954,8 @@ class InstrumentAgent(ResourceAgent):
             self._asp.reset_connection()
 
         except InstDriverClientTimeoutError:
-            self._stop_driver()
-            self._on_driver_comms_error('_handler_lost_connection__autoreconnect')
+            self._stop_driver(True)
+            self._on_driver_comms_error('_handler_lost_connection__autoreconnect: connect')
             return (ResourceAgentState.UNINITIALIZED, None)
 
         except:
@@ -935,8 +971,8 @@ class InstrumentAgent(ResourceAgent):
                 break
 
             except InstDriverClientTimeoutError:
-                self._stop_driver()
-                self._on_driver_comms_error('_handler_lost_connection__autoreconnect')
+                self._stop_driver(True)
+                self._on_driver_comms_error('_handler_lost_connection__autoreconnect: discover state')
                 return (ResourceAgentState.UNINITIALIZED, None)
 
             except Timeout, ResourceError:
@@ -945,16 +981,16 @@ class InstrumentAgent(ResourceAgent):
                     log.error("Could not discover instrument state.")
                     next_state = ResourceAgentState.ACTIVE_UNKNOWN
                     break
-                
+
         if next_state == ResourceAgentState.IDLE and \
             self._state_when_lost == ResourceAgentState.COMMAND:
                 next_state = ResourceAgentState.COMMAND
-   
+
         return (next_state, None)
 
     ##############################################################
     # ACTIVE_UNKNOWN event handlers.
-    ##############################################################    
+    ##############################################################
 
     def _handler_active_unknown_go_active(self, *args, **kwargs):
         max_tries = kwargs.get('max_tries', 5)
@@ -967,7 +1003,7 @@ class InstrumentAgent(ResourceAgent):
                 break
 
             except InstDriverClientTimeoutError:
-                self._stop_driver()
+                self._stop_driver(True)
                 self._on_driver_comms_error('_handler_active_unknown_go_active')
                 return (ResourceAgentState.UNINITIALIZED, None)
 
@@ -985,7 +1021,7 @@ class InstrumentAgent(ResourceAgent):
             self._dvr_client.cmd_dvr('initialize')
             next_state = ResourceAgentState.INACTIVE
         except InstDriverClientTimeoutError:
-            self._stop_driver()
+            self._stop_driver(True)
             next_state = ResourceAgentState.UNINITIALIZED
             self._on_driver_comms_error('_handler_active_unknown_go_inactive')
 
@@ -996,7 +1032,9 @@ class InstrumentAgent(ResourceAgent):
             self._dvr_client.cmd_dvr('initialize')
         except:
             self._on_driver_comms_error('_handler_active_unknown_reset')
-        self._stop_driver()
+            self._stop_driver(True)
+        else:
+            self._stop_driver()
         return (ResourceAgentState.UNINITIALIZED, None)
 
     def _handler_active_unknown_go_direct_access(self, *args, **kwargs):
@@ -1005,7 +1043,7 @@ class InstrumentAgent(ResourceAgent):
         session_type = kwargs.get('session_type', None)
 
         if not session_type:
-            raise BadRequest('Instrument parameter error attempting direct access: session_type not present') 
+            raise BadRequest('Instrument parameter error attempting direct access: session_type not present')
 
         log.info("Instrument agent requested to start direct access mode: sessionTO=%d, inactivityTO=%d,  session_type=%s",
                  session_timeout, inactivity_timeout, dir(DirectAccessTypes)[session_type])
@@ -1016,18 +1054,18 @@ class InstrumentAgent(ResourceAgent):
         log.debug("hostname: %s, ip address: %s", hostname, ip_addresses)
 #        ip_address = ip_addresses[2][0]
         ip_address = hostname
-        
+
         # create a DA server instance (TODO: just telnet for now) and pass in callback method
         try:
-            self._da_server = DirectAccessServer(session_type, 
-                                                self._da_server_input_processor, 
+            self._da_server = DirectAccessServer(session_type,
+                                                self._da_server_input_processor,
                                                 ip_address,
                                                 session_timeout,
                                                 inactivity_timeout)
         except Exception as ex:
             log.warning("InstrumentAgent: failed to start DA Server <%s>",ex)
             raise ex
-        
+
         # get the connection info from the DA server to return to the user
         port, token = self._da_server.get_connection_info()
         result = {'ip_address':ip_address, 'port':port, 'token':token}
@@ -1035,7 +1073,7 @@ class InstrumentAgent(ResourceAgent):
         try:
             next_state, _ = self._dvr_client.cmd_dvr('start_direct')
         except InstDriverClientTimeoutError:
-            self._stop_driver()
+            self._stop_driver(True)
             self._da_server.stop()
             self._da_server = None
             next_state = ResourceAgentState.UNINITIALIZED
@@ -1406,7 +1444,8 @@ class InstrumentAgent(ResourceAgent):
         self._dvr_proc.launch()
 
         # Verify the driver has started.
-        if not self._dvr_proc.getpid():
+        pid = self._dvr_proc.getpid()
+        if not pid:
             log.error('Instrument agent %s error starting driver process.', self._proc_name)
             self._dvr_proc = None
             raise ResourceError('Error starting driver process.')
@@ -1415,33 +1454,58 @@ class InstrumentAgent(ResourceAgent):
             driver_client = self._dvr_proc.get_client()
             driver_client.start_messaging(self.evt_recv)
             retval = driver_client.cmd_dvr('process_echo', 'Test.')
+
+            resource_schema = driver_client.cmd_dvr('get_config_metadata')
+            if isinstance(resource_schema, str):
+                resource_schema = json.loads(resource_schema)
+                if isinstance(resource_schema, dict):
+                    self._resource_schema = resource_schema
+                else:
+                    self._resource_schema = {}
+            else:
+                self._resource_schema = {}
+
             startup_config = dvr_config.get('startup_config',None)
+
+            # filter parameters in the schema, remove READ_ONLY
+            parameters = self._resource_schema.get('parameters', None)
+            if parameters and startup_config:
+                for (k,v) in parameters.iteritems():
+                    if 'visibility' in v and v['visibility'] == 'READ_ONLY':
+                        if 'parameters' in startup_config and k in startup_config['parameters']:
+                            del startup_config['parameters'][k]
+
+
             if startup_config:
                 retval = driver_client.cmd_dvr('set_init_params', startup_config)
             self._dvr_client = driver_client
             self._start_pinger()
 
         except Exception, e:
-            self._dvr_proc.stop()
+            self._dvr_proc.stop(True)
             self._dvr_proc = None
             self._dvr_client = None
             log.error('Instrument agent %s error starting driver client. %s', self._proc_name, e)
             raise ResourceError('Error starting driver client.')
 
         log.info('Instrument agent %s started its driver.', self._proc_name)
+        self.aparam_driver_pid = pid
 
-    def _stop_driver(self):
+    def _stop_pinger(self):
         """
-        Stop the driver process and driver client.
         """
-            
         if self._pinger:
             self._pinger.kill()
             self._pinger.join()
             self._pinger = None
 
+    def _stop_driver(self, force=False):
+        """
+        Stop the driver process and driver client.
+        """
+
         if self._dvr_proc:
-            self._dvr_proc.stop()
+            self._dvr_proc.stop(force)
             self._dvr_proc = None
             self._dvr_client = None
             self._resource_schema = {}
@@ -1473,15 +1537,25 @@ class InstrumentAgent(ResourceAgent):
             while True:
                 gevent.sleep(15)
                 try:
+                    # If we have reset, then kill the greenlet automatically.
+                    state = self._fsm.get_current_state()
+                    if state == ResourceAgentState.UNINITIALIZED:
+                        log.info('Stopping pinger.')
+                        self._pinger = None
+                        break
+
                     retval = self._fsm.on_event_if_free(ResourceAgentEvent.PING_RESOURCE, driver_timeout=60)
                     log.info(str(retval))
 
+                    # If we have reset, then kill the greenlet automatically.
+                    state = self._fsm.get_current_state()
+                    if state == ResourceAgentState.UNINITIALIZED:
+                        log.info('Stopping pinger.')
+                        self._pinger = None
+                        break
+
                 except FSMLockedError:
                     log.warning('Pinger blocked, will try again later.')
-
-                except InstDriverClientTimeoutError:
-                    self._on_driver_comms_error('driver pinger')
-                    self._fsm.on_evvent(ResourceAgentEvent.RESET)
 
                 except Exception as ex:
                     log.error('Pinger got unexpected exception: %s', str(ex))
@@ -1503,7 +1577,6 @@ class InstrumentAgent(ResourceAgent):
 
         # If specified and configed, build the alerts aparam.                
         aparam_alerts_config = self.CFG.get('aparam_alerts_config', None)
-        print str(aparam_alerts_config)
         if aparam_alerts_config and 'alerts' in aparams:
             self.aparam_set_alerts(aparam_alerts_config)
                 

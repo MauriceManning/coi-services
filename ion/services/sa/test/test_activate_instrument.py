@@ -18,6 +18,7 @@ from interface.services.dm.iuser_notification_service import UserNotificationSer
 
 # This import will dynamically load the driver egg.  It is needed for the MI includes below
 import ion.agents.instrument.test.test_instrument_agent
+from ion.agents.instrument.test.test_instrument_agent import DRV_URI_GOOD
 from mi.instrument.seabird.sbe37smb.ooicore.driver import SBE37ProtocolEvent
 
 from ion.services.dm.utility.granule_utils import time_series_domain
@@ -266,7 +267,7 @@ class TestActivateInstrumentIntegration(IonIntegrationTestCase):
         instAgent_obj = IonObject(RT.InstrumentAgent,
                                   name='agent007',
                                   description="SBE37IMAgent",
-                                  driver_uri="http://sddevrepo.oceanobservatories.org/releases/seabird_sbe37smb_ooicore-0.0.1a-py2.7.egg",
+                                  driver_uri=DRV_URI_GOOD,
                                   stream_configurations = [raw_config, parsed_config])
         instAgent_id = self.imsclient.create_instrument_agent(instAgent_obj)
         log.debug('new InstrumentAgent id = %s', instAgent_id)
@@ -403,7 +404,7 @@ class TestActivateInstrumentIntegration(IonIntegrationTestCase):
         self.assertTrue(gate.await(30), "The instrument agent instance (%s) did not spawn in 30 seconds" %
                                         inst_agent_instance_obj.agent_process_id)
 
-        log.debug('Instrument agent instance obj: = %s' , str(inst_agent_instance_obj))
+        #log.trace('Instrument agent instance obj: = %s' , str(inst_agent_instance_obj))
 
         # Start a resource agent client to talk with the instrument agent.
         self._ia_client = ResourceAgentClient(instDevice_id,
@@ -471,23 +472,31 @@ class TestActivateInstrumentIntegration(IonIntegrationTestCase):
         # Now get the data in one chunk using an RPC Call to start_retreive
         #--------------------------------------------------------------------------------
 
-        replay_data = self.dataretrieverclient.retrieve(self.parsed_dataset)
-        self.assertIsInstance(replay_data, Granule)
-        rdt = RecordDictionaryTool.load_from_granule(replay_data)
-        log.debug("test_activateInstrumentSample: RDT parsed: %s", str(rdt.pretty_print()) )
-        self.assertIn('temp', rdt)
-        temp_vals = rdt['temp']
-        pressure_vals  = rdt['pressure']
-        self.assertEquals(10, len(temp_vals))
+        replay_data_raw = self.dataretrieverclient.retrieve(self.raw_dataset)
+        self.assertIsInstance(replay_data_raw, Granule)
+        rdt_raw = RecordDictionaryTool.load_from_granule(replay_data_raw)
+        log.debug("RDT raw: %s", str(rdt_raw.pretty_print()) )
 
-        replay_data = self.dataretrieverclient.retrieve(self.raw_dataset)
-        self.assertIsInstance(replay_data, Granule)
-        rdt = RecordDictionaryTool.load_from_granule(replay_data)
-        log.debug("RDT raw: %s", str(rdt.pretty_print()) )
+        self.assertIn('raw', rdt_raw)
+        raw_vals = rdt_raw['raw']
+        if 10 != len([v for v in raw_vals if v == 't']):
+            log.error("%s raw_vals: ", len(raw_vals))
+            for i, r in enumerate(raw_vals): log.error("raw val %s: %s", i, [r])
+            self.fail("Expected 10 't' strings in raw_vals, got %s" % len(raw_vals))
+        else:
+            log.debug("%s raw_vals: ", len(raw_vals))
+            for i, r in enumerate(raw_vals): log.debug("raw val %s: %s", i, [r])
 
-        self.assertIn('raw', rdt)
-        raw_vals = rdt['raw']
-        self.assertEquals(10, len(raw_vals))
+        replay_data_parsed = self.dataretrieverclient.retrieve(self.parsed_dataset)
+        self.assertIsInstance(replay_data_parsed, Granule)
+        rdt_parsed = RecordDictionaryTool.load_from_granule(replay_data_parsed)
+        log.debug("test_activateInstrumentSample: RDT parsed: %s", str(rdt_parsed.pretty_print()) )
+        self.assertIn('temp', rdt_parsed)
+        temp_vals = rdt_parsed['temp']
+        pressure_vals  = rdt_parsed['pressure']
+        if 10 != len(temp_vals):
+            log.error("%s temp_vals: %s", len(temp_vals), temp_vals)
+            self.fail("Expected 10 temp_vals, got %s" % len(temp_vals))
 
 
         log.debug("l4-ci-sa-rq-138")
