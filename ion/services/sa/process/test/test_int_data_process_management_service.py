@@ -235,7 +235,8 @@ class TestIntDataProcessManagementServiceMultiOut(IonIntegrationTestCase):
         # Create the data process
         #---------------------------------------------------------------------------
 
-        dproc_id = self.dataprocessclient.create_data_process( in_data_product_ids = [input_dp_id],
+        dproc_id = self.dataprocessclient.create_data_process( data_process_definition_id= dprocdef_id,
+                                                                in_data_product_ids = [input_dp_id],
                                                                 out_data_product_ids = [conductivity_dp_id, pressure_dp_id,temp_dp_id],
                                                                 configuration= config )
         self.addCleanup(self.dataprocessclient.delete_data_process, dproc_id)

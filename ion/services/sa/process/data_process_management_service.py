@@ -1017,8 +1017,12 @@ class DataProcessManagementService(BaseDataProcessManagementService):
 
     def delete_data_process(self, data_process_id=""):
 
+        dpd = ''
         data_process_definitions, _ = self.clients.resource_registry.find_subjects(object=data_process_id, predicate=PRED.hasDataProcess, subject_type=RT.DataProcessDefinition, id_only=False)
-        dpd = data_process_definitions[0]
+        if data_process_definitions:
+            dpd = data_process_definitions[0]
+        else:
+            log.warning('No data process definition associated with data process: %s', data_process_id)
 
         #Stops processes and deletes the data process associations
         #TODO: Delete the processes also?
@@ -1045,7 +1049,7 @@ class DataProcessManagementService(BaseDataProcessManagementService):
             self.clients.resource_registry.delete_association(assoc)
 
         # Remove the streams associated with the data process if it's a retrieve process
-        if dpd.data_process_type == DataProcessTypeEnum.RETRIEVE_PROCESS:
+        if dpd and dpd.data_process_type == DataProcessTypeEnum.RETRIEVE_PROCESS:
             stream_ids, _ = self.clients.find_objects(data_process_id, PRED.hasStream, id_only=True)
             for stream_id in stream_ids:
                 self.clients.pubsub_management.delete_stream(stream_id)
